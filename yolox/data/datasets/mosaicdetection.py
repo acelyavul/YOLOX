@@ -224,9 +224,9 @@ class MosaicDetection(Dataset):
             cp_bboxes_transformed_np[:, 1::2] - y_offset, 0, target_h
         )
 
-        cls_labels = cp_labels[:, 4:5].copy()
+        cls_and_ignore_labels = cp_labels[:, 4:].copy()
         box_labels = cp_bboxes_transformed_np
-        labels = np.hstack((box_labels, cls_labels))
+        labels = np.hstack((box_labels, cls_and_ignore_labels))
         origin_labels = np.vstack((origin_labels, labels))
         origin_img = origin_img.astype(np.float32)
         origin_img = 0.5 * origin_img + 0.5 * padded_cropped_img.astype(np.float32)

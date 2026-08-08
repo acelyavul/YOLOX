@@ -267,9 +267,6 @@ class YOLOXHead(nn.Module):
         obj_preds = outputs[:, :, 4:5]  # [batch, n_anchors_all, 1]
         cls_preds = outputs[:, :, 5:]  # [batch, n_anchors_all, n_cls]
 
-        # calculate targets
-        nlabel = (labels.sum(dim=2) > 0).sum(dim=1)  # number of objects
-
         total_num_anchors = outputs.shape[1]
         x_shifts = torch.cat(x_shifts, 1)  # [1, n_anchors_all]
         y_shifts = torch.cat(y_shifts, 1)  # [1, n_anchors_all]
@@ -281,14 +278,35 @@ class YOLOXHead(nn.Module):
         reg_targets = []
         l1_targets = []
         obj_targets = []
+        obj_loss_masks = []
         fg_masks = []
 
         num_fg = 0.0
         num_gts = 0.0
 
         for batch_idx in range(outputs.shape[0]):
-            num_gt = int(nlabel[batch_idx])
+            labels_per_image = labels[batch_idx]
+            annotation_mask = labels_per_image[:, 1:5].sum(dim=1) > 0
+            annotations_per_image = labels_per_image[annotation_mask]
+            if labels.shape[2] > 5:
+                ignore_annotation_mask = annotations_per_image[:, 5] > 0.5
+            else:
+                ignore_annotation_mask = outputs.new_zeros(
+                    len(annotations_per_image), dtype=torch.bool
+                )
+            ignore_bboxes_per_image = annotations_per_image[
+                ignore_annotation_mask, 1:5
+            ]
+            ground_truth = annotations_per_image[~ignore_annotation_mask]
+            num_gt = len(ground_truth)
             num_gts += num_gt
+            obj_loss_mask = self.get_objectness_loss_mask(
+                ignore_bboxes_per_image,
+                expanded_strides,
+                x_shifts,
+                y_shifts,
+                total_num_anchors,
+            )
             if num_gt == 0:
                 cls_target = outputs.new_zeros((0, self.num_classes))
                 reg_target = outputs.new_zeros((0, 4))
@@ -296,8 +314,8 @@ class YOLOXHead(nn.Module):
                 obj_target = outputs.new_zeros((total_num_anchors, 1))
                 fg_mask = outputs.new_zeros(total_num_anchors).bool()
             else:
-                gt_bboxes_per_image = labels[batch_idx, :num_gt, 1:5]
-                gt_classes = labels[batch_idx, :num_gt, 0]
+                gt_bboxes_per_image = ground_truth[:, 1:5]
+                gt_classes = ground_truth[:, 0]
                 bboxes_preds_per_image = bbox_preds[batch_idx]
 
                 try:
@@ -357,6 +375,7 @@ class YOLOXHead(nn.Module):
                     gt_matched_classes.to(torch.int64), self.num_classes
                 ) * pred_ious_this_matching.unsqueeze(-1)
                 obj_target = fg_mask.unsqueeze(-1)
+                obj_loss_mask[fg_mask] = True
                 reg_target = gt_bboxes_per_image[matched_gt_inds]
                 if self.use_l1:
                     l1_target = self.get_l1_target(
@@ -370,6 +389,7 @@ class YOLOXHead(nn.Module):
             cls_targets.append(cls_target)
             reg_targets.append(reg_target)
             obj_targets.append(obj_target.to(dtype))
+            obj_loss_masks.append(obj_loss_mask)
             fg_masks.append(fg_mask)
             if self.use_l1:
                 l1_targets.append(l1_target)
@@ -377,6 +397,7 @@ class YOLOXHead(nn.Module):
         cls_targets = torch.cat(cls_targets, 0)
         reg_targets = torch.cat(reg_targets, 0)
         obj_targets = torch.cat(obj_targets, 0)
+        obj_loss_masks = torch.cat(obj_loss_masks, 0)
         fg_masks = torch.cat(fg_masks, 0)
         if self.use_l1:
             l1_targets = torch.cat(l1_targets, 0)
@@ -386,7 +407,9 @@ class YOLOXHead(nn.Module):
             self.iou_loss(bbox_preds.view(-1, 4)[fg_masks], reg_targets)
         ).sum() / num_fg
         loss_obj = (
-            self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets)
+            self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets)[
+                obj_loss_masks
+            ]
         ).sum() / num_fg
         loss_cls = (
             self.bcewithlog_loss(
@@ -411,6 +434,38 @@ class YOLOXHead(nn.Module):
             loss_l1,
             num_fg / max(num_gts, 1),
         )
+
+    def get_objectness_loss_mask(
+        self,
+        ignore_bboxes_per_image,
+        expanded_strides,
+        x_shifts,
+        y_shifts,
+        total_num_anchors,
+    ):
+        """Exclude anchors centered inside ignore boxes from objectness loss."""
+        if len(ignore_bboxes_per_image) == 0:
+            return torch.ones(
+                total_num_anchors,
+                dtype=torch.bool,
+                device=expanded_strides.device,
+            )
+
+        x_centers = (x_shifts[0] + 0.5) * expanded_strides[0]
+        y_centers = (y_shifts[0] + 0.5) * expanded_strides[0]
+        half_widths = ignore_bboxes_per_image[:, 2:3] * 0.5
+        half_heights = ignore_bboxes_per_image[:, 3:4] * 0.5
+        left = ignore_bboxes_per_image[:, 0:1] - half_widths
+        right = ignore_bboxes_per_image[:, 0:1] + half_widths
+        top = ignore_bboxes_per_image[:, 1:2] - half_heights
+        bottom = ignore_bboxes_per_image[:, 1:2] + half_heights
+        centers_in_ignore_boxes = (
+            (x_centers.unsqueeze(0) >= left)
+            & (x_centers.unsqueeze(0) <= right)
+            & (y_centers.unsqueeze(0) >= top)
+            & (y_centers.unsqueeze(0) <= bottom)
+        )
+        return ~centers_in_ignore_boxes.any(dim=0)
 
     def get_l1_target(self, l1_target, gt, stride, x_shifts, y_shifts, eps=1e-8):
         l1_target[:, 0] = gt[:, 0] / stride - x_shifts
@@ -613,15 +668,19 @@ class YOLOXHead(nn.Module):
         y_shifts = torch.cat(y_shifts, 1)  # [1, n_anchors_all]
         expanded_strides = torch.cat(expanded_strides, 1)
 
-        nlabel = (labels.sum(dim=2) > 0).sum(dim=1)  # number of objects
-        for batch_idx, (img, num_gt, label) in enumerate(zip(imgs, nlabel, labels)):
+        for batch_idx, (img, label) in enumerate(zip(imgs, labels)):
             img = imgs[batch_idx].permute(1, 2, 0).to(torch.uint8)
-            num_gt = int(num_gt)
+            annotation_mask = label[:, 1:5].sum(dim=1) > 0
+            annotations = label[annotation_mask]
+            if labels.shape[2] > 5:
+                annotations = annotations[annotations[:, 5] <= 0.5]
+            gt_bboxes_per_image = annotations[:, 1:5]
+            gt_classes = annotations[:, 0]
+            num_gt = len(annotations)
             if num_gt == 0:
                 fg_mask = outputs.new_zeros(total_num_anchors).bool()
+                matched_gt_inds = outputs.new_zeros(0, dtype=torch.long)
             else:
-                gt_bboxes_per_image = label[:num_gt, 1:5]
-                gt_classes = label[:num_gt, 0]
                 bboxes_preds_per_image = bbox_preds[batch_idx]
                 _, fg_mask, _, matched_gt_inds, _ = self.get_assignments(  # noqa
                     batch_idx, num_gt, gt_bboxes_per_image, gt_classes,

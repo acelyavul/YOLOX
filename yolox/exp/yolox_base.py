@@ -249,8 +249,8 @@ class Exp(BaseExp):
             inputs = nn.functional.interpolate(
                 inputs, size=tsize, mode="bilinear", align_corners=False
             )
-            targets[..., 1::2] = targets[..., 1::2] * scale_x
-            targets[..., 2::2] = targets[..., 2::2] * scale_y
+            targets[..., 1:5:2] = targets[..., 1:5:2] * scale_x
+            targets[..., 2:5:2] = targets[..., 2:5:2] * scale_y
         return inputs, targets
 
     def get_optimizer(self, batch_size):
