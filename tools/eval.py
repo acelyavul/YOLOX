@@ -13,8 +13,10 @@ import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from yolox.core import launch
+from yolox.evaluators.coco_metrics import COCOAPMetric
 from yolox.exp import get_exp
 from yolox.utils import (
+    MlflowLogger,
     configure_module,
     configure_nccl,
     fuse_model,
@@ -28,6 +30,14 @@ def make_parser():
     parser = argparse.ArgumentParser("YOLOX Eval")
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+    parser.add_argument(
+        "-l",
+        "--logger",
+        type=str,
+        choices=["none", "mlflow"],
+        default="none",
+        help="evaluation logger",
+    )
 
     # distributed
     parser.add_argument(
@@ -164,7 +174,7 @@ def main(exp, args, num_gpu):
             ckpt_file = args.ckpt
         logger.info("loading checkpoint from {}".format(ckpt_file))
         loc = "cuda:{}".format(rank)
-        ckpt = torch.load(ckpt_file, map_location=loc)
+        ckpt = torch.load(ckpt_file, map_location=loc, weights_only=False)
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
 
@@ -189,11 +199,30 @@ def main(exp, args, num_gpu):
         trt_file = None
         decoder = None
 
+    mlflow_logger = None
+    if rank == 0 and args.logger == "mlflow":
+        mlflow_logger = MlflowLogger()
+        mlflow_logger.setup(args=args, exp=exp)
+
     # start evaluate
-    *_, summary = evaluator.evaluate(
+    ap50_95, ap50, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size
     )
+    ap75 = getattr(evaluator, "metrics", {}).get(COCOAPMetric.AP75.value)
     logger.info("\n" + summary)
+
+    if mlflow_logger is not None:
+        metrics = {
+            "eval/COCOAP50_95": ap50_95,
+            "eval/COCOAP50": ap50,
+        }
+        if ap75 is not None:
+            metrics["eval/COCOAP75"] = ap75
+        mlflow_logger.on_eval_end(
+            args=args,
+            file_name=file_name,
+            metrics=metrics,
+        )
 
 
 if __name__ == "__main__":

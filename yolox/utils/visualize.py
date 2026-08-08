@@ -8,7 +8,16 @@ import numpy as np
 __all__ = ["vis"]
 
 
-def vis(img, boxes, scores, cls_ids, conf=0.5, class_names=None):
+def vis(
+    img,
+    boxes,
+    scores,
+    cls_ids,
+    conf=0.5,
+    class_names=None,
+    box_color=None,
+    box_thickness=2,
+):
 
     for i in range(len(boxes)):
         box = boxes[i]
@@ -21,15 +30,27 @@ def vis(img, boxes, scores, cls_ids, conf=0.5, class_names=None):
         x1 = int(box[2])
         y1 = int(box[3])
 
-        color = (_COLORS[cls_id] * 255).astype(np.uint8).tolist()
+        color = (
+            list(box_color)
+            if box_color is not None
+            else (_COLORS[cls_id] * 255).astype(np.uint8).tolist()
+        )
         text = '{}:{:.1f}%'.format(class_names[cls_id], score * 100)
-        txt_color = (0, 0, 0) if np.mean(_COLORS[cls_id]) > 0.5 else (255, 255, 255)
+        txt_color = (
+            (255, 255, 255)
+            if box_color is not None
+            else (0, 0, 0) if np.mean(_COLORS[cls_id]) > 0.5 else (255, 255, 255)
+        )
         font = cv2.FONT_HERSHEY_SIMPLEX
 
         txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
-        cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+        cv2.rectangle(img, (x0, y0), (x1, y1), color, box_thickness)
 
-        txt_bk_color = (_COLORS[cls_id] * 255 * 0.7).astype(np.uint8).tolist()
+        txt_bk_color = (
+            color
+            if box_color is not None
+            else (_COLORS[cls_id] * 255 * 0.7).astype(np.uint8).tolist()
+        )
         cv2.rectangle(
             img,
             (x0, y0 + 1),

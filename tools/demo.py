@@ -32,9 +32,9 @@ def make_parser():
     )
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
     parser.add_argument(
-        "--save_result",
-        action="store_true",
-        help="whether to save the inference result of image/video",
+        "--output-name",
+        default=None,
+        help="name of the image preview output directory",
     )
 
     # exp file
@@ -180,11 +180,22 @@ class Predictor(object):
         cls = output[:, 6]
         scores = output[:, 4] * output[:, 5]
 
-        vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
+        vis_res = vis(
+            img,
+            bboxes,
+            scores,
+            cls,
+            cls_conf,
+            self.cls_names,
+            box_color=(0, 0, 255),
+            box_thickness=4,
+        )
         return vis_res
 
 
-def image_demo(predictor, vis_folder, path, current_time, save_result):
+def image_demo(
+    predictor, vis_folder, path, current_time, save_result, output_name=None
+):
     if os.path.isdir(path):
         files = get_image_list(path)
     else:
@@ -194,13 +205,18 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
         outputs, img_info = predictor.inference(image_name)
         result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
         if save_result:
+            folder_name = output_name or time.strftime(
+                "%Y_%m_%d_%H_%M_%S", current_time
+            )
             save_folder = os.path.join(
-                vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+                vis_folder, folder_name
             )
             os.makedirs(save_folder, exist_ok=True)
             save_file_name = os.path.join(save_folder, os.path.basename(image_name))
             logger.info("Saving detection result in {}".format(save_file_name))
             cv2.imwrite(save_file_name, result_image)
+            continue
+        cv2.imshow("YOLOX", result_image)
         ch = cv2.waitKey(0)
         if ch == 27 or ch == ord("q") or ch == ord("Q"):
             break
@@ -245,12 +261,16 @@ def main(exp, args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
 
+    if args.demo == "image" and not args.output_name:
+        raise ValueError("Image preview requires --output-name.")
+    args.save_result = args.output_name is not None
+
     file_name = os.path.join(exp.output_dir, args.experiment_name)
     os.makedirs(file_name, exist_ok=True)
 
     vis_folder = None
     if args.save_result:
-        vis_folder = os.path.join(file_name, "vis_res")
+        vis_folder = os.path.join(file_name, "eval_preview")
         os.makedirs(vis_folder, exist_ok=True)
 
     if args.trt:
@@ -280,7 +300,7 @@ def main(exp, args):
         else:
             ckpt_file = args.ckpt
         logger.info("loading checkpoint")
-        ckpt = torch.load(ckpt_file, map_location="cpu")
+        ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
         # load the model state dict
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
@@ -302,13 +322,23 @@ def main(exp, args):
         trt_file = None
         decoder = None
 
+    class_names = getattr(exp, "class_names", COCO_CLASSES)
     predictor = Predictor(
-        model, exp, COCO_CLASSES, trt_file, decoder,
+        model, exp, class_names, trt_file, decoder,
         args.device, args.fp16, args.legacy,
     )
     current_time = time.localtime()
     if args.demo == "image":
-        image_demo(predictor, vis_folder, args.path, current_time, args.save_result)
+        if args.output_name and os.path.basename(args.output_name) != args.output_name:
+            raise ValueError("Output name must be a directory name, not a path.")
+        image_demo(
+            predictor,
+            vis_folder,
+            args.path,
+            current_time,
+            args.save_result,
+            args.output_name,
+        )
     elif args.demo == "video" or args.demo == "webcam":
         imageflow_demo(predictor, vis_folder, current_time, args)
 

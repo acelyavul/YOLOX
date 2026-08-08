@@ -11,6 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from yolox.data import DataPrefetcher
+from yolox.evaluators.coco_metrics import COCOAPMetric
 from yolox.exp import Exp
 from yolox.utils import (
     MeterBuffer,
@@ -56,6 +57,9 @@ class Trainer:
         self.data_type = torch.float16 if args.fp16 else torch.float32
         self.input_size = exp.input_size
         self.best_ap = 0
+        self.selection_metric = getattr(
+            exp, "selection_metric", COCOAPMetric.AP50_95.value
+        )
 
         # metric record
         self.meter = MeterBuffer(window_size=exp.print_interval)
@@ -198,7 +202,9 @@ class Trainer:
 
     def after_train(self):
         logger.info(
-            "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
+            "Training of experiment is done and the best {} is {:.2f}".format(
+                self.selection_metric, self.best_ap * 100
+            )
         )
         if self.rank == 0:
             if self.args.logger == "wandb":
@@ -209,7 +215,8 @@ class Trainer:
                     "input_size": self.input_size,
                     'start_ckpt': self.args.ckpt,
                     'exp_file': self.args.exp_file,
-                    "best_ap": float(self.best_ap)
+                    "best_ap": float(self.best_ap),
+                    "selection_metric": self.selection_metric,
                 }
                 self.mlflow_logger.on_train_end(self.args, file_name=self.file_name,
                                                 metadata=metadata)
@@ -324,6 +331,15 @@ class Trainer:
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            checkpoint_selection_metric = ckpt.get(
+                "selection_metric", COCOAPMetric.AP50_95.value
+            )
+            if checkpoint_selection_metric != self.selection_metric:
+                raise ValueError(
+                    "Checkpoint selection metric mismatch: "
+                    f"checkpoint={checkpoint_selection_metric}, "
+                    f"experiment={self.selection_metric}."
+                )
             self.best_ap = ckpt.pop("best_ap", 0)
             # resume the training states variables
             start_epoch = (
@@ -364,34 +380,56 @@ class Trainer:
                 evalmodel, self.evaluator, self.is_distributed, return_outputs=True
             )
 
-        update_best_ckpt = ap50_95 > self.best_ap
-        self.best_ap = max(self.best_ap, ap50_95)
+        metrics = {
+            COCOAPMetric.AP50_95.value: ap50_95,
+            COCOAPMetric.AP50.value: ap50,
+        }
+        metrics.update(getattr(self.evaluator, "metrics", {}))
+        ap75 = metrics.get(COCOAPMetric.AP75.value)
+        if self.selection_metric not in metrics:
+            raise ValueError(
+                f"Unsupported checkpoint selection metric: {self.selection_metric}"
+            )
+        selection_value = metrics[self.selection_metric]
+        update_best_ckpt = selection_value > self.best_ap
+        self.best_ap = max(self.best_ap, selection_value)
 
         if self.rank == 0:
             if self.args.logger == "tensorboard":
                 self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
                 self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
+                if ap75 is not None:
+                    self.tblogger.add_scalar("val/COCOAP75", ap75, self.epoch + 1)
+                self.tblogger.add_scalar(
+                    "val/best_selection_metric", self.best_ap, self.epoch + 1
+                )
             if self.args.logger == "wandb":
-                self.wandb_logger.log_metrics({
+                logs = {
                     "val/COCOAP50": ap50,
                     "val/COCOAP50_95": ap50_95,
+                    "val/best_selection_metric": self.best_ap,
                     "train/epoch": self.epoch + 1,
-                })
+                }
+                if ap75 is not None:
+                    logs["val/COCOAP75"] = ap75
+                self.wandb_logger.log_metrics(logs)
                 self.wandb_logger.log_images(predictions)
             if self.args.logger == "mlflow":
                 logs = {
                     "val/COCOAP50": ap50,
                     "val/COCOAP50_95": ap50_95,
-                    "val/best_ap": round(self.best_ap, 3),
+                    "val/best_selection_metric": self.best_ap,
                     "train/epoch": self.epoch + 1,
                 }
+                if ap75 is not None:
+                    logs["val/COCOAP75"] = ap75
                 self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
             logger.info("\n" + summary)
         synchronize()
 
-        self.save_ckpt("last_epoch", update_best_ckpt, ap=ap50_95)
+        self.save_ckpt("last_epoch", update_best_ckpt, ap=selection_value)
         if self.save_history_ckpt:
-            self.save_ckpt(f"epoch_{self.epoch + 1}", ap=ap50_95)
+            self.save_ckpt(f"epoch_{self.epoch + 1}", ap=selection_value)
 
         if self.args.logger == "mlflow":
             metadata = {
@@ -399,7 +437,8 @@ class Trainer:
                     "input_size": self.input_size,
                     'start_ckpt': self.args.ckpt,
                     'exp_file': self.args.exp_file,
-                    "best_ap": float(self.best_ap)
+                    "best_ap": float(self.best_ap),
+                    "selection_metric": self.selection_metric,
                 }
             self.mlflow_logger.save_checkpoints(self.args, self.exp, self.file_name, self.epoch,
                                                 metadata, update_best_ckpt)
@@ -414,6 +453,7 @@ class Trainer:
                 "optimizer": self.optimizer.state_dict(),
                 "best_ap": self.best_ap,
                 "curr_ap": ap,
+                "selection_metric": self.selection_metric,
             }
             save_checkpoint(
                 ckpt_state,
@@ -431,6 +471,7 @@ class Trainer:
                         "epoch": self.epoch + 1,
                         "optimizer": self.optimizer.state_dict(),
                         "best_ap": self.best_ap,
-                        "curr_ap": ap
+                        "curr_ap": ap,
+                        "selection_metric": self.selection_metric,
                     }
                 )

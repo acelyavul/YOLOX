@@ -161,8 +161,7 @@ class MlflowLogger:
 
         self._mlflow_log_nth_epoch_models = os.getenv("YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS",
                                                       "False").upper() in self.ENV_VARS_TRUE_VALUES
-        self.run_name = os.getenv("YOLOX_MLFLOW_RUN_NAME", None)
-        self.run_name = None if len(self.run_name.strip()) == 0 else self.run_name
+        self.run_name = os.getenv("YOLOX_MLFLOW_RUN_NAME", "").strip() or None
         self._flatten_params = os.getenv("YOLOX_MLFLOW_FLATTEN_PARAMS",
                                          "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
         self._nested_run = os.getenv("MLFLOW_NESTED_RUN",
@@ -266,7 +265,7 @@ class MlflowLogger:
         """
         filter_keys = ['max_epoch', 'num_classes', 'input_size', 'output_dir',
                        'data_dir', 'train_ann', 'val_ann', 'test_ann',
-                       'test_conf', 'nmsthre']
+                       'test_conf', 'nmsthre', 'selection_metric']
         exp_dict = {k: v for k, v in exp.__dict__.items()
                     if not k.startswith("__") and k in filter_keys}
         return exp_dict
@@ -332,6 +331,26 @@ class MlflowLogger:
                 )
             if self._auto_end_run and self._ml_flow.active_run():
                 self._ml_flow.end_run()
+
+    def on_eval_end(self, args, file_name, metrics):
+        """Log evaluation metrics and the evaluation log, then close the run."""
+        if not (is_main_process() and self._initialized):
+            return
+
+        self._ml_flow.set_tag("workflow.stage", "evaluation")
+        self._ml_flow.log_metrics(metrics)
+
+        log_file_path = os.path.join(file_name, "val_log.txt")
+        mlflow_out_dir = f"{args.experiment_name}/evaluation"
+        logger.info(
+            f"Logging evaluation logfile: {log_file_path} in MLflow artifact path: "
+            f"{mlflow_out_dir}."
+        )
+        self._ml_flow.log_artifact(log_file_path, mlflow_out_dir)
+        self._ml_flow.log_dict(metrics, f"{mlflow_out_dir}/metrics.json")
+
+        if self._auto_end_run and self._ml_flow.active_run():
+            self._ml_flow.end_run()
 
     def save_log_file(self, args, file_name):
         """

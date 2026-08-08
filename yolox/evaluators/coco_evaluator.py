@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from yolox.data.datasets import COCO_CLASSES
+from yolox.evaluators.coco_metrics import COCOAPMetric
 from yolox.utils import (
     gather,
     is_main_process,
@@ -139,6 +140,7 @@ class COCOEvaluator:
         self.testdev = testdev
         self.per_class_AP = per_class_AP
         self.per_class_AR = per_class_AR
+        self.metrics = {}
 
     def evaluate(
         self, model, distributed=False, half=False, trt_file=None,
@@ -281,6 +283,11 @@ class COCOEvaluator:
 
     def evaluate_prediction(self, data_dict, statistics):
         if not is_main_process():
+            self.metrics = {
+                COCOAPMetric.AP50_95.value: 0,
+                COCOAPMetric.AP50.value: 0,
+                COCOAPMetric.AP75.value: 0,
+            }
             return 0, 0, None
 
         logger.info("Evaluate in main process...")
@@ -332,6 +339,16 @@ class COCOEvaluator:
             if self.per_class_AR:
                 AR_table = per_class_AR_table(cocoEval, class_names=cat_names)
                 info += "per class AR:\n" + AR_table + "\n"
+            self.metrics = {
+                COCOAPMetric.AP50_95.value: cocoEval.stats[0],
+                COCOAPMetric.AP50.value: cocoEval.stats[1],
+                COCOAPMetric.AP75.value: cocoEval.stats[2],
+            }
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
+            self.metrics = {
+                COCOAPMetric.AP50_95.value: 0,
+                COCOAPMetric.AP50.value: 0,
+                COCOAPMetric.AP75.value: 0,
+            }
             return 0, 0, info
