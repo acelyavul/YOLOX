@@ -28,6 +28,33 @@ from yolox.utils import (
 )
 
 
+_COCO_EVALUATOR_CLASS = None
+
+
+def build_coco_evaluator(coco_gt, coco_dt, iou_type):
+    """Build the optimized COCO evaluator or cache the standard fallback."""
+    global _COCO_EVALUATOR_CLASS
+
+    if _COCO_EVALUATOR_CLASS is not None:
+        return _COCO_EVALUATOR_CLASS(coco_gt, coco_dt, iou_type)
+
+    try:
+        from yolox.layers import COCOeval_opt
+
+        evaluator = COCOeval_opt(coco_gt, coco_dt, iou_type)
+        _COCO_EVALUATOR_CLASS = COCOeval_opt
+        return evaluator
+    except (ImportError, OSError, RuntimeError) as error:
+        from pycocotools.cocoeval import COCOeval
+
+        logger.warning(
+            "Fast COCO evaluation is unavailable ({}); using standard COCO "
+            "evaluation.".format(type(error).__name__)
+        )
+        _COCO_EVALUATOR_CLASS = COCOeval
+        return COCOeval(coco_gt, coco_dt, iou_type)
+
+
 def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
     per_class_AR = {}
     recalls = coco_eval.eval["recall"]
@@ -290,14 +317,7 @@ class COCOEvaluator:
                 _, tmp = tempfile.mkstemp()
                 json.dump(data_dict, open(tmp, "w"))
                 cocoDt = cocoGt.loadRes(tmp)
-            try:
-                from yolox.layers import COCOeval_opt as COCOeval
-            except ImportError:
-                from pycocotools.cocoeval import COCOeval
-
-                logger.warning("Use standard COCOeval.")
-
-            cocoEval = COCOeval(cocoGt, cocoDt, annType[1])
+            cocoEval = build_coco_evaluator(cocoGt, cocoDt, annType[1])
             cocoEval.evaluate()
             cocoEval.accumulate()
             redirect_string = io.StringIO()
