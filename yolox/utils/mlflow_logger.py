@@ -327,7 +327,9 @@ class MlflowLogger:
                 model_file_name = "best_ckpt"
                 mlflow_out_dir = f"{args.experiment_name}/{model_file_name}"
                 artifact_path = os.path.join(file_name, f"{model_file_name}.pth")
-                self.mlflow_save_pyfunc_model(metadata, artifact_path, mlflow_out_dir)
+                self.mlflow_save_checkpoint_artifact(
+                    metadata, artifact_path, mlflow_out_dir
+                )
             if self._auto_end_run and self._ml_flow.active_run():
                 self._ml_flow.end_run()
 
@@ -371,18 +373,22 @@ class MlflowLogger:
                     model_file_name = "best_ckpt"
                     mlflow_out_dir = f"{args.experiment_name}/{model_file_name}"
                     artifact_path = os.path.join(file_name, f"{model_file_name}.pth")
-                    self.mlflow_save_pyfunc_model(metadata, artifact_path, mlflow_out_dir)
-                    self.best_ckpt_upload_pending = False
+                    uploaded = self.mlflow_save_checkpoint_artifact(
+                        metadata, artifact_path, mlflow_out_dir
+                    )
+                    if uploaded:
+                        self.best_ckpt_upload_pending = False
                 if self._mlflow_log_nth_epoch_models and exp.save_history_ckpt:
                     model_file_name = f"epoch_{epoch + 1}_ckpt"
                     mlflow_out_dir = f"{args.experiment_name}/hist_epochs/{model_file_name}"
                     artifact_path = os.path.join(file_name, f"{model_file_name}.pth")
-                    self.mlflow_save_pyfunc_model(metadata, artifact_path, mlflow_out_dir)
+                    self.mlflow_save_checkpoint_artifact(
+                        metadata, artifact_path, mlflow_out_dir
+                    )
 
-    def mlflow_save_pyfunc_model(self, metadata, artifact_path, mlflow_out_dir):
+    def mlflow_save_checkpoint_artifact(self, metadata, artifact_path, mlflow_out_dir):
         """
-        This will send the given model to mlflow server if HF_MLFLOW_LOG_ARTIFACTS is true
-            - optionally publish to model registry if allowed in config file
+        Log a raw YOLOX checkpoint and its metadata as MLflow run artifacts.
 
         Args:
             metadata(dict): model related metadata
@@ -390,19 +396,35 @@ class MlflowLogger:
             mlflow_out_dir(str): mlflow artifact path
 
         Returns:
-            None
+            bool: True when the checkpoint and metadata were uploaded.
         """
-        if is_main_process() and self._initialized and self._mlflow_log_artifacts:
-            logger.info(
-                f"Logging checkpoint {artifact_path} artifacts in mlflow artifact path: "
-                f"{mlflow_out_dir}. This may take time.")
-            if os.path.exists(artifact_path):
-                self._ml_flow.pyfunc.log_model(
-                    mlflow_out_dir,
-                    artifacts={"model_path": artifact_path},
-                    python_model=self._ml_flow.pyfunc.PythonModel(),
-                    metadata=metadata
-                )
+        if not (
+            is_main_process() and self._initialized and self._mlflow_log_artifacts
+        ):
+            return False
+        if not os.path.exists(artifact_path):
+            logger.error(f"Checkpoint artifact does not exist: {artifact_path}")
+            return False
+
+        logger.info(
+            f"Logging checkpoint {artifact_path} in MLflow artifact path: "
+            f"{mlflow_out_dir}. This may take time."
+        )
+        try:
+            self._ml_flow.log_artifact(
+                artifact_path,
+                artifact_path=mlflow_out_dir,
+            )
+            self._ml_flow.log_dict(
+                metadata,
+                f"{mlflow_out_dir}/metadata.json",
+            )
+        except Exception as error:
+            logger.error(
+                f"Failed to log checkpoint artifact {artifact_path}: {error}"
+            )
+            return False
+        return True
 
     def __del__(self):
         """
