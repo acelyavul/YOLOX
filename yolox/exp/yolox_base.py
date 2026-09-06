@@ -168,6 +168,7 @@ class Exp(BaseExp):
             DataLoader,
             InfiniteSampler,
             MosaicDetection,
+            worker_init_seed,
             worker_init_reset_seed,
         )
         from yolox.utils import wait_for_the_master
@@ -201,7 +202,8 @@ class Exp(BaseExp):
         if is_distributed:
             batch_size = batch_size // dist.get_world_size()
 
-        sampler = InfiniteSampler(len(self.dataset), seed=self.seed if self.seed else 0)
+        seed = int(self.seed) if self.seed is not None else 0
+        sampler = InfiniteSampler(len(self.dataset), seed=seed)
 
         batch_sampler = YoloBatchSampler(
             sampler=sampler,
@@ -210,12 +212,19 @@ class Exp(BaseExp):
             mosaic=not no_aug,
         )
 
-        dataloader_kwargs = {"num_workers": self.data_num_workers, "pin_memory": True}
+        dataloader_kwargs = {
+            "num_workers": self.data_num_workers,
+            "pin_memory": True,
+        }
+        if self.seed is not None:
+            rank = dist.get_rank() if is_distributed else 0
+            generator = torch.Generator()
+            generator.manual_seed(seed + rank)
+            dataloader_kwargs["generator"] = generator
+            dataloader_kwargs["worker_init_fn"] = worker_init_seed
+        else:
+            dataloader_kwargs["worker_init_fn"] = worker_init_reset_seed
         dataloader_kwargs["batch_sampler"] = batch_sampler
-
-        # Make sure each process has different random seed, especially for 'fork' method.
-        # Check https://github.com/pytorch/pytorch/issues/63311 for more details.
-        dataloader_kwargs["worker_init_fn"] = worker_init_reset_seed
 
         train_loader = DataLoader(self.dataset, **dataloader_kwargs)
 

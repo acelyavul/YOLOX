@@ -3,16 +3,20 @@
 # Copyright (c) Megvii, Inc. and its affiliates.
 
 import argparse
-import random
 import warnings
 from loguru import logger
 
-import torch
 import torch.backends.cudnn as cudnn
 
 from yolox.core import launch
 from yolox.exp import Exp, check_exp_value, get_exp
-from yolox.utils import configure_module, configure_nccl, configure_omp, get_num_devices
+from yolox.utils import (
+    configure_determinism,
+    configure_module,
+    configure_nccl,
+    configure_omp,
+    get_num_devices,
+)
 
 
 def make_parser():
@@ -100,19 +104,15 @@ def make_parser():
 @logger.catch
 def main(exp: Exp, args):
     if exp.seed is not None:
-        random.seed(exp.seed)
-        torch.manual_seed(exp.seed)
-        cudnn.deterministic = True
+        configure_determinism(exp.seed)
         warnings.warn(
-            "You have chosen to seed training. This will turn on the CUDNN deterministic setting, "
-            "which can slow down your training considerably! You may see unexpected behavior "
-            "when restarting from checkpoints."
+            "Deterministic training is enabled. This can reduce training throughput."
         )
 
     # set environment variables for distributed training
     configure_nccl()
     configure_omp()
-    cudnn.benchmark = True
+    cudnn.benchmark = exp.seed is None
 
     trainer = exp.get_trainer(args)
     trainer.train()
@@ -125,8 +125,14 @@ if __name__ == "__main__":
     exp.merge(args.opts)
     check_exp_value(exp)
 
+    if exp.seed is not None:
+        configure_determinism(exp.seed)
+
     if not args.experiment_name:
-        args.experiment_name = exp.exp_name
+        run_name_factory = getattr(exp, "get_run_name", None)
+        args.experiment_name = (
+            run_name_factory() if callable(run_name_factory) else exp.exp_name
+        )
 
     num_gpu = get_num_devices() if args.devices is None else args.devices
     assert num_gpu <= get_num_devices()

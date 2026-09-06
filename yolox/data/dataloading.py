@@ -106,7 +106,17 @@ def list_collate(batch):
     return items
 
 
+def worker_init_seed(worker_id):
+    """Seed non-PyTorch RNGs from the deterministic DataLoader worker seed."""
+    del worker_id
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
 def worker_init_reset_seed(worker_id):
+    """Reset worker RNGs using the original YOLOX non-deterministic behavior."""
+    del worker_id
     seed = uuid.uuid4().int % 2**32
     random.seed(seed)
     torch.set_rng_state(torch.manual_seed(seed).get_state())

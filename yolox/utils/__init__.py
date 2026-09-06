@@ -4,6 +4,8 @@
 from .allreduce_norm import *
 from .boxes import *
 from .checkpoint import load_ckpt, save_checkpoint
+from .reproducibility import configure_determinism
+from .run_metadata import write_run_metadata
 from .compat import meshgrid
 from .demo_utils import *
 from .dist import *

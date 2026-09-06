@@ -31,7 +31,8 @@ from yolox.utils import (
     occupy_mem,
     save_checkpoint,
     setup_logger,
-    synchronize
+    synchronize,
+    write_run_metadata,
 )
 
 
@@ -57,6 +58,7 @@ class Trainer:
         self.data_type = torch.float16 if args.fp16 else torch.float32
         self.input_size = exp.input_size
         self.best_ap = 0
+        self.start_checkpoint_path = None
         self.selection_metric = getattr(
             exp, "selection_metric", COCOAPMetric.AP50_95.value
         )
@@ -150,6 +152,9 @@ class Trainer:
         # value of epoch will be set in `resume_train`
         model = self.resume_train(model)
 
+        if self.rank == 0:
+            self.save_run_metadata()
+
         # data related init
         self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
         self.train_loader = self.exp.get_data_loader(
@@ -207,6 +212,7 @@ class Trainer:
             )
         )
         if self.rank == 0:
+            self.save_run_metadata()
             if self.args.logger == "wandb":
                 self.wandb_logger.finish()
             elif self.args.logger == "mlflow":
@@ -323,6 +329,8 @@ class Trainer:
             else:
                 ckpt_file = self.args.ckpt
 
+            self.start_checkpoint_path = os.path.abspath(ckpt_file)
+
             ckpt = torch.load(
                 ckpt_file,
                 map_location=self.device,
@@ -357,6 +365,7 @@ class Trainer:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
+                self.start_checkpoint_path = os.path.abspath(ckpt_file)
                 ckpt = torch.load(
                     ckpt_file,
                     map_location=self.device,
@@ -366,6 +375,22 @@ class Trainer:
             self.start_epoch = 0
 
         return model
+
+    def save_run_metadata(self):
+        """Persist environment and artifact identity for this training run."""
+        artifact_names = ("best_ckpt.pth", "latest_ckpt.pth")
+        artifacts = {
+            name: os.path.join(self.file_name, name)
+            for name in artifact_names
+        }
+        metadata_path = write_run_metadata(
+            run_directory=self.file_name,
+            batch_size=self.args.batch_size,
+            seed=self.exp.seed,
+            start_checkpoint=self.start_checkpoint_path,
+            artifacts=artifacts,
+        )
+        logger.info("Run metadata saved to {}".format(metadata_path))
 
     def evaluate_and_save_model(self):
         if self.use_model_ema:
