@@ -54,8 +54,24 @@ class MlflowLogger:
         self._flatten_params = None
         self._nested_run = None
         self._run_id = None
+        self._tags = {}
         self._async_log = None
         self._ml_flow = mlflow
+
+    @property
+    def run_id(self):
+        """Return the active MLflow run ID."""
+        return self._run_id
+
+    @property
+    def experiment_name(self):
+        """Return the configured MLflow experiment name."""
+        return self._experiment_name
+
+    @property
+    def tags(self):
+        """Return a copy of the configured MLflow tags."""
+        return dict(self._tags)
 
     def is_required_library_available(self):
         """
@@ -167,6 +183,8 @@ class MlflowLogger:
         self._nested_run = os.getenv("MLFLOW_NESTED_RUN",
                                      "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
         self._run_id = os.getenv("MLFLOW_RUN_ID", None)
+        mlflow_tags = os.getenv("MLFLOW_TAGS", None)
+        self._tags = json.loads(mlflow_tags) if mlflow_tags else {}
 
         # "synchronous" flag is only available with mlflow version >= 2.8.0
         # https://github.com/mlflow/mlflow/pull/9705
@@ -176,7 +194,8 @@ class MlflowLogger:
 
         logger.debug(
             f"MLflow experiment_name={self._experiment_name}, run_name={self.run_name}, "
-            f"nested={self._nested_run}, tags={self._nested_run}, tracking_uri={self._tracking_uri}"
+            f"nested={self._nested_run}, tags={bool(self._tags)}, "
+            f"tracking_uri={self._tracking_uri}"
         )
         if is_main_process():
             if not self._ml_flow.is_tracking_uri_set():
@@ -195,10 +214,18 @@ class MlflowLogger:
                 if self._experiment_name:
                     # Use of set_experiment() ensure that Experiment is created if not exists
                     self._ml_flow.set_experiment(self._experiment_name)
-                self._ml_flow.start_run(run_name=self.run_name, nested=self._nested_run)
+                active_run = self._ml_flow.start_run(
+                    run_id=self._run_id,
+                    run_name=self.run_name,
+                    nested=self._nested_run,
+                )
+                self._run_id = active_run.info.run_id
                 logger.debug(
-                    f"MLflow run started with run_id={self._ml_flow.active_run().info.run_id}")
+                    f"MLflow run started with run_id={self._run_id}")
                 self._auto_end_run = True
+                self._initialized = True
+            elif self._ml_flow.active_run() is not None:
+                self._run_id = self._ml_flow.active_run().info.run_id
                 self._initialized = True
             # filters these params from args
             keys = ['experiment_name', 'batch_size', 'exp_file', 'resume', 'ckpt', 'start_epoch',
@@ -208,10 +235,8 @@ class MlflowLogger:
                 exp_dict = self.convert_exp_todict(exp)
                 combined_dict = {**exp_dict, **combined_dict}
             self.log_params_mlflow(combined_dict)
-            mlflow_tags = os.getenv("MLFLOW_TAGS", None)
-            if mlflow_tags:
-                mlflow_tags = json.loads(mlflow_tags)
-                self._ml_flow.set_tags(mlflow_tags)
+            if self._tags:
+                self._ml_flow.set_tags(self._tags)
 
     def log_params_mlflow(self, params_dict):
         """
@@ -332,22 +357,19 @@ class MlflowLogger:
             if self._auto_end_run and self._ml_flow.active_run():
                 self._ml_flow.end_run()
 
-    def on_eval_end(self, args, file_name, metrics):
-        """Log evaluation metrics and the evaluation log, then close the run."""
+    def on_eval_end(self, args, file_name, metrics, artifact_files=None):
+        """Log evaluation metrics and artifacts, then close the run."""
         if not (is_main_process() and self._initialized):
             return
 
         self._ml_flow.set_tag("workflow.stage", "evaluation")
-        self._ml_flow.log_metrics(metrics)
+        self._ml_flow.log_metrics({
+            key: value for key, value in metrics.items() if value is not None
+        })
 
-        log_file_path = os.path.join(file_name, "val_log.txt")
         mlflow_out_dir = f"{args.experiment_name}/evaluation"
-        logger.info(
-            f"Logging evaluation logfile: {log_file_path} in MLflow artifact path: "
-            f"{mlflow_out_dir}."
-        )
-        self._ml_flow.log_artifact(log_file_path, mlflow_out_dir)
-        self._ml_flow.log_dict(metrics, f"{mlflow_out_dir}/metrics.json")
+        for artifact_file in artifact_files or ():
+            self._ml_flow.log_artifact(artifact_file, mlflow_out_dir)
 
         if self._auto_end_run and self._ml_flow.active_run():
             self._ml_flow.end_run()

@@ -6,6 +6,8 @@ import argparse
 import os
 import random
 import warnings
+from datetime import datetime, timezone
+from pathlib import Path
 from loguru import logger
 
 import torch
@@ -13,7 +15,7 @@ import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from yolox.core import launch
-from yolox.evaluators.coco_metrics import COCOAPMetric
+from yolox.evaluators.coco_metrics import COCOAPMetric, COCOEvaluationMetric
 from yolox.exp import get_exp
 from yolox.utils import (
     MlflowLogger,
@@ -22,7 +24,9 @@ from yolox.utils import (
     fuse_model,
     get_local_rank,
     get_model_info,
-    setup_logger
+    setup_logger,
+    write_evaluation_results,
+    write_evaluation_run_metadata,
 )
 
 
@@ -167,6 +171,7 @@ def main(exp, args, num_gpu):
     model.cuda(rank)
     model.eval()
 
+    ckpt_file = None
     if not args.speed and not args.trt:
         if args.ckpt is None:
             ckpt_file = os.path.join(file_name, "best_ckpt.pth")
@@ -208,20 +213,109 @@ def main(exp, args, num_gpu):
     ap50_95, ap50, summary = evaluator.evaluate(
         model, is_distributed, args.fp16, trt_file, decoder, exp.test_size
     )
-    ap75 = getattr(evaluator, "metrics", {}).get(COCOAPMetric.AP75.value)
+    evaluator_metrics = getattr(evaluator, "metrics", {})
+    ap75 = evaluator_metrics.get(COCOAPMetric.AP75.value)
+    recall_at_iou_0_75 = evaluator_metrics.get(
+        COCOEvaluationMetric.RECALL_AT_IOU_0_75.value
+    )
+    negative_image_false_positive_rate = evaluator_metrics.get(
+        COCOEvaluationMetric.NEGATIVE_IMAGE_FALSE_POSITIVE_RATE.value
+    )
     logger.info("\n" + summary)
 
+    artifact_files = ()
+    if rank == 0 and ckpt_file is not None:
+        tags = mlflow_logger.tags if mlflow_logger is not None else {}
+        evaluation_run_id = (
+            mlflow_logger.run_id if mlflow_logger is not None else None
+        )
+        workflow_stage = tags.get("workflow.stage", "evaluation")
+        provenance_mode = tags.get("provenance.mode")
+        source_training_run_id = tags.get("model.source_run_id")
+        annotation_name = exp.test_ann if args.test else exp.val_ann
+        split_path = Path(exp.data_dir) / "annotations" / annotation_name
+        split_display_path = str(
+            Path(Path(exp.data_dir).name) / "annotations" / annotation_name
+        ).replace("\\", "/")
+        log_file = Path(file_name) / "val_log.txt"
+        result_metrics = {
+            "ap50": float(ap50),
+            "ap50_95": float(ap50_95),
+            "ap75": float(ap75) if ap75 is not None else None,
+            "negative_image_false_positive_rate": (
+                float(negative_image_false_positive_rate)
+                if negative_image_false_positive_rate is not None
+                else None
+            ),
+            "recall_at_iou_0_75": (
+                float(recall_at_iou_0_75)
+                if recall_at_iou_0_75 is not None
+                else None
+            ),
+        }
+        evaluation_results_path = write_evaluation_results(
+            run_directory=file_name,
+            metrics=result_metrics,
+            evaluation_run_id=evaluation_run_id,
+            source_training_run_id=source_training_run_id,
+            provenance_mode=provenance_mode,
+            workflow_stage=workflow_stage,
+            tested_checkpoint=ckpt_file,
+            test_split=split_path,
+            test_split_display_path=split_display_path,
+            log_file=log_file,
+        )
+        run_metadata_path = write_evaluation_run_metadata(
+            run_directory=file_name,
+            batch_size=args.batch_size,
+            devices=args.devices,
+            seed=args.seed,
+            fp16=args.fp16,
+            experiment_id=exp.exp_name,
+            tested_checkpoint=ckpt_file,
+            test_split=split_path,
+            confidence_threshold=exp.test_conf,
+            nms_threshold=exp.nmsthre,
+            evaluation_completed_at=datetime.now(timezone.utc).isoformat(),
+            mlflow_experiment_name=(
+                mlflow_logger.experiment_name
+                if mlflow_logger is not None
+                else None
+            ),
+            mlflow_run_name=(
+                mlflow_logger.run_name if mlflow_logger is not None else None
+            ),
+            mlflow_run_id=evaluation_run_id,
+            source_training_run_id=source_training_run_id,
+            provenance_mode=provenance_mode,
+            workflow_stage=workflow_stage,
+            artifacts={
+                "evaluation_results.json": evaluation_results_path,
+                "val_log.txt": log_file,
+            },
+        )
+        artifact_files = (
+            str(log_file),
+            str(evaluation_results_path),
+            str(run_metadata_path),
+        )
+
     if mlflow_logger is not None:
-        metrics = {
+        mlflow_metrics = {
             "eval/COCOAP50_95": ap50_95,
             "eval/COCOAP50": ap50,
+            "eval/negative_image_false_positive_rate": (
+                negative_image_false_positive_rate
+            ),
+            "eval/recall_at_iou_0_75": recall_at_iou_0_75,
         }
         if ap75 is not None:
-            metrics["eval/COCOAP75"] = ap75
+            mlflow_metrics["eval/COCOAP75"] = ap75
         mlflow_logger.on_eval_end(
             args=args,
             file_name=file_name,
-            metrics=metrics,
+            metrics=mlflow_metrics,
+            artifact_files=artifact_files,
         )
 
 
@@ -232,7 +326,12 @@ if __name__ == "__main__":
     exp.merge(args.opts)
 
     if not args.experiment_name:
-        args.experiment_name = exp.exp_name
+        mlflow_experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "").strip()
+        args.experiment_name = (
+            mlflow_experiment_name
+            if args.logger == "mlflow" and mlflow_experiment_name
+            else exp.exp_name
+        )
 
     num_gpu = torch.cuda.device_count() if args.devices is None else args.devices
     assert num_gpu <= torch.cuda.device_count()
