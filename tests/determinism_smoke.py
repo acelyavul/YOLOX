@@ -27,7 +27,7 @@ DEFAULT_ANNOTATION_FILE = (
     / "train-batch-003"
     / "instances_default.json"
 )
-DEFAULT_OUTPUT_DIRECTORY = YOLOX_ROOT / "YOLOX_outputs" / "determinism_smoke"
+DEFAULT_OUTPUT_DIRECTORY = YOLOX_ROOT / "tests" / "outputs" / "determinism_smoke"
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
 
 
