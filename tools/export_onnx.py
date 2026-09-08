@@ -76,7 +76,11 @@ def main():
         ckpt_file = args.ckpt
 
     # load the model state dict
-    ckpt = torch.load(ckpt_file, map_location="cpu")
+    ckpt = torch.load(
+        ckpt_file,
+        map_location="cpu",
+        weights_only=False,
+    )
 
     model.eval()
     if "model" in ckpt:
@@ -88,7 +92,7 @@ def main():
     logger.info("loading checkpoint done.")
     dummy_input = torch.randn(args.batch_size, 3, exp.test_size[0], exp.test_size[1])
 
-    torch.onnx._export(
+    torch.onnx.export(
         model,
         dummy_input,
         args.output_name,
@@ -97,6 +101,7 @@ def main():
         dynamic_axes={args.input: {0: 'batch'},
                       args.output: {0: 'batch'}} if args.dynamic else None,
         opset_version=args.opset,
+        dynamo=False,
     )
     logger.info("generated onnx model named {}".format(args.output_name))
 
