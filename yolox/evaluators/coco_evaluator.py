@@ -18,7 +18,12 @@ import numpy as np
 import torch
 
 from yolox.data.datasets import COCO_CLASSES
-from yolox.evaluators.coco_metrics import COCOAPMetric
+from yolox.evaluators.coco_metrics import (
+    COCOAPMetric,
+    COCOEvaluationMetric,
+    coco_recall_at_iou,
+    negative_image_false_positive_rate,
+)
 from yolox.utils import (
     gather,
     is_main_process,
@@ -287,6 +292,8 @@ class COCOEvaluator:
                 COCOAPMetric.AP50_95.value: 0,
                 COCOAPMetric.AP50.value: 0,
                 COCOAPMetric.AP75.value: 0,
+                COCOEvaluationMetric.RECALL_AT_IOU_0_75.value: None,
+                COCOEvaluationMetric.NEGATIVE_IMAGE_FALSE_POSITIVE_RATE.value: None,
             }
             return 0, 0, None
 
@@ -343,6 +350,12 @@ class COCOEvaluator:
                 COCOAPMetric.AP50_95.value: cocoEval.stats[0],
                 COCOAPMetric.AP50.value: cocoEval.stats[1],
                 COCOAPMetric.AP75.value: cocoEval.stats[2],
+                COCOEvaluationMetric.RECALL_AT_IOU_0_75.value: (
+                    coco_recall_at_iou(cocoEval, 0.75)
+                ),
+                COCOEvaluationMetric.NEGATIVE_IMAGE_FALSE_POSITIVE_RATE.value: (
+                    negative_image_false_positive_rate(cocoGt, data_dict)
+                ),
             }
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
@@ -350,5 +363,11 @@ class COCOEvaluator:
                 COCOAPMetric.AP50_95.value: 0,
                 COCOAPMetric.AP50.value: 0,
                 COCOAPMetric.AP75.value: 0,
+                COCOEvaluationMetric.RECALL_AT_IOU_0_75.value: 0,
+                COCOEvaluationMetric.NEGATIVE_IMAGE_FALSE_POSITIVE_RATE.value: (
+                    negative_image_false_positive_rate(
+                        self.dataloader.dataset.coco, data_dict
+                    )
+                ),
             }
             return 0, 0, info
